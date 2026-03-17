@@ -12,6 +12,8 @@ dependencies = [
   "pydantic-settings==2.12.0",
   "sqlmodel>=0.0.22",
   "uvicorn[standard]==0.40.0",
+  "requests>=2.31.0",
+  "python-dotenv>=1.0.0",
 ]
 
 [dependency-groups]
