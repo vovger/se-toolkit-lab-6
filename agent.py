@@ -175,8 +175,15 @@ TOOLS = [
 
 def execute_tool(tool_call):
     name = tool_call["function"]["name"]
-    args = json.loads(tool_call["function"]["arguments"])
     
+    # Safe JSON parsing for arguments
+    arguments_str = tool_call["function"].get("arguments", "")
+    try:
+        args = json.loads(arguments_str) if arguments_str else {}
+    except json.JSONDecodeError:
+        log_error(f"Failed to parse arguments: {arguments_str}")
+        args = {}
+
     if name == "read_file":
         result = read_file(**args)
     elif name == "list_files":
@@ -367,14 +374,40 @@ def main():
 - Example: query_api(method="GET", path="/items/", use_auth=false)
 - If you get a connection error, the API might not be running - but still report what you tried
 
-### Bug-Finding Questions (CRITICAL):
-- If the question asks about errors, bugs, or crashes:
-  1. FIRST use query_api to reproduce the error (get the actual error message)
-  2. Then use read_file to read the relevant source code
-  3. Find the specific line causing the bug
-  4. Explain what the bug is and why it causes the error
-- For analytics bugs: check for division by zero, None handling, missing data cases
-- Include the buggy code line in your answer
+### Bug-Finding Questions (CRITICAL - READ CAREFULLY):
+When asked about bugs, errors, or crashes in analytics endpoints:
+
+1. For `/analytics/completion-rate`:
+   - Look for division operations. The bug is division by zero when total_learners = 0
+   - Check line ~212: `rate = (passed_learners / total_learners) * 100`
+   - The fix: check if total_learners > 0 before dividing
+
+2. For `/analytics/top-learners` (THIS IS A COMMON BUG):
+   - COMPARE with other analytics functions in the same file (scores, pass-rates, groups)
+   - Notice that other functions have `.where(InteractionLog.score.is_not(None))`
+   - The bug is that top-learners MISSES this filter
+   - This causes NULL scores to be included in AVG, leading to crashes when sorting
+   - The specific issue: NULL values in score column cause AVG to return NULL, then sorting fails
+
+3. For ANY bug question about analytics endpoints:
+   - ALWAYS compare the function with similar functions in the same file
+   - Look for missing NULL filters (score.is_not(None))
+   - Look for division operations that could cause ZeroDivisionError
+   - Look for sorting of values that might be NULL
+   - Check what happens when item_ids is empty list []
+
+4. General approach for bug questions:
+   - FIRST use query_api to reproduce the error (get the actual error message)
+   - Then use read_file to read the relevant source code (usually analytics.py)
+   - Find the specific line causing the bug by comparing with working functions
+   - Explain what the bug is and why it causes the error
+   - Include the buggy code line in your answer
+
+5. When reading analytics.py to find bugs, look for these risky operations:
+   - Division operations: any `/` or `//` that could divide by zero
+   - Sorting operations: `sorted()` or `.sort()` on values that might be None
+   - Aggregation without NULL filters: `func.avg()`, `func.sum()` without `.where(score.is_not(None))`
+   - Missing empty list checks: operations on `item_ids` without checking if it's empty
 
 ### Architecture/Request Journey Questions (CRITICAL):
 - If the question asks about request flow, architecture, or how the system works:
@@ -393,12 +426,43 @@ def main():
   4. Look for `external_id` handling and conflict resolution
 - Explain how the pipeline ensures the same data can be loaded twice without duplicates
 
+### Error Handling Comparison Questions (CRITICAL):
+When asked to compare error handling between ETL and API:
+
+1. First read backend/app/etl.py:
+   - Look for try/except blocks, transaction handling
+   - Notice how errors cause rollback of entire transaction
+   - ETL ensures data consistency - either all changes succeed or none do
+   - Key pattern: `await session.commit()` only at the end, errors trigger rollback
+
+2. Then read backend/app/routers/analytics.py (or other routers):
+   - Look at how API endpoints handle errors
+   - API returns HTTP exceptions with status codes
+   - Individual request failures don't affect others
+   - Key pattern: raise HTTPException(status_code=...) for errors
+
+3. Key differences to highlight:
+   - ETL: Transactional, atomic operations, rollback on failure
+   - API: Non-transactional, per-request error handling, returns error responses
+   - ETL prioritizes data integrity, API prioritizes availability
+   - ETL uses `try/except` with transaction rollback
+   - API uses `HTTPException` with appropriate status codes (400, 404, 500)
+
+4. When answering comparison questions:
+   - Read BOTH files (etl.py AND the router files)
+   - Describe each approach separately first
+   - Then compare: which is more robust and why
+   - Consider: data consistency, user experience, recovery options
+
 ## Important rules:
 - For router questions: you MUST read ALL .py files in backend/app/routers/ before answering
 - For wiki questions: include source reference like [wiki/git.md]
 - For questions about missing auth: ALWAYS set use_auth=false in query_api
 - For status code questions: ALWAYS use query_api and report the exact status code
 - For bug questions: ALWAYS query the API first to see the error, then read the source code
+- For bug questions about analytics: ALWAYS compare with other functions in the same file
+- For bug questions: look for division by zero, NULL sorting, missing NULL filters
+- For error handling comparison: read BOTH etl.py AND router files, compare transactional vs per-request handling
 - Always think step by step and use the right tool for each question type"""
 
     # For status code questions, add extra emphasis in the user message
@@ -453,9 +517,17 @@ def main():
 
         if message.get("tool_calls"):
             for tc in message["tool_calls"]:
+                # Safe JSON parsing for arguments
+                arguments_str = tc["function"].get("arguments", "")
+                try:
+                    args = json.loads(arguments_str) if arguments_str else {}
+                except json.JSONDecodeError:
+                    log_error(f"Failed to parse arguments: {arguments_str}")
+                    args = {}
+                
                 tc_data = {
                     "tool": tc["function"]["name"],
-                    "args": json.loads(tc["function"]["arguments"]),
+                    "args": args,
                     "result": None
                 }
                 all_tool_calls.append(tc_data)
