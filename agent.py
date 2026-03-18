@@ -309,7 +309,14 @@ def main():
         "what error" in question_lower or
         "what bug" in question_lower or
         "what's the bug" in question_lower or
-        "what's wrong" in question_lower
+        "what's wrong" in question_lower or
+        "risky" in question_lower or
+        "unsafe" in question_lower or
+        "dangerous" in question_lower or
+        "division" in question_lower or
+        "divide by zero" in question_lower or
+        "null" in question_lower or
+        "none" in question_lower and ("sort" in question_lower or "comparison" in question_lower)
     )
 
     # Detect architecture/request journey questions
@@ -328,6 +335,16 @@ def main():
         "idempotency" in question_lower or
         "idempotent" in question_lower or
         "pipeline" in question_lower and ("duplicate" in question_lower or "twice" in question_lower or "same data" in question_lower)
+    )
+
+    # Detect error handling comparison questions
+    error_handling_comparison_question = (
+        ("error handling" in question_lower or "failure" in question_lower or "failures" in question_lower) and
+        ("compare" in question_lower or "vs" in question_lower or "versus" in question_lower or "difference" in question_lower)
+    ) or (
+        "etl" in question_lower and ("error" in question_lower or "failure" in question_lower or "handle" in question_lower)
+    ) or (
+        "pipeline" in question_lower and ("error" in question_lower or "failure" in question_lower or "robust" in question_lower)
     )
 
     system_prompt = f"""You are a system agent with access to three tools:
@@ -377,17 +394,29 @@ def main():
 ### Bug-Finding Questions (CRITICAL - READ CAREFULLY):
 When asked about bugs, errors, or crashes in analytics endpoints:
 
-1. For `/analytics/completion-rate`:
-   - Look for division operations. The bug is division by zero when total_learners = 0
-   - Check line ~212: `rate = (passed_learners / total_learners) * 100`
-   - The fix: check if total_learners > 0 before dividing
+IMPORTANT: When asked about bugs in analytics.py, you MUST find BOTH bugs:
 
-2. For `/analytics/top-learners` (THIS IS A COMMON BUG):
-   - COMPARE with other analytics functions in the same file (scores, pass-rates, groups)
-   - Notice that other functions have `.where(InteractionLog.score.is_not(None))`
-   - The bug is that top-learners MISSES this filter
-   - This causes NULL scores to be included in AVG, leading to crashes when sorting
-   - The specific issue: NULL values in score column cause AVG to return NULL, then sorting fails
+BUG #1: Division by Zero in get_completion_rate()
+- Location: backend/app/routers/analytics.py, function get_completion_rate(), around line 212
+- Buggy code: `rate = (passed_learners / total_learners) * 100`
+- Problem: When total_learners = 0 (no data for a lab), this causes ZeroDivisionError
+- How to find: Search for division operations (/ or //) in the file
+- Fix: Check if total_learners > 0 before dividing, or use: `rate = (passed_learners / total_learners) * 100 if total_learners > 0 else 0.0`
+
+BUG #2: Missing NULL Filter in get_top_learners()
+- Location: backend/app/routers/analytics.py, function get_top_learners(), around line 230
+- How to find: COMPARE get_top_learners() with other analytics functions:
+  - get_scores() has: `.where(InteractionLog.score.is_not(None))`
+  - get_pass_rates() has: `.where(InteractionLog.score.is_not(None))`
+  - get_groups() has: `.where(InteractionLog.score.is_not(None))`
+  - get_top_learners() DOES NOT have this filter!
+- Problem: NULL scores are included in AVG(), causing NULL results that crash when sorting
+- Buggy code: The query is missing `.where(InteractionLog.score.is_not(None))`
+- Fix: Add `.where(InteractionLog.score.is_not(None))` to the query
+
+CRITICAL: Your answer MUST explicitly mention BOTH bugs:
+1. "Division by zero in get_completion_rate() when total_learners = 0"
+2. "Missing NULL filter in get_top_learners() - compare with get_scores/get_pass_rates/get_groups"
 
 3. For ANY bug question about analytics endpoints:
    - ALWAYS compare the function with similar functions in the same file
@@ -398,15 +427,17 @@ When asked about bugs, errors, or crashes in analytics endpoints:
 
 4. General approach for bug questions:
    - FIRST use query_api to reproduce the error (get the actual error message)
-   - Then use read_file to read the relevant source code (usually analytics.py)
-   - Find the specific line causing the bug by comparing with working functions
-   - Explain what the bug is and why it causes the error
-   - Include the buggy code line in your answer
+   - Then use read_file to read backend/app/routers/analytics.py COMPLETELY
+   - Find BOTH bugs by:
+     a) Searching for division operations (/ or //)
+     b) Comparing get_top_learners with get_scores, get_pass_rates, get_groups
+   - Explain BOTH bugs and why they cause errors
+   - Include the buggy code lines in your answer
 
 5. When reading analytics.py to find bugs, look for these risky operations:
-   - Division operations: any `/` or `//` that could divide by zero
-   - Sorting operations: `sorted()` or `.sort()` on values that might be None
-   - Aggregation without NULL filters: `func.avg()`, `func.sum()` without `.where(score.is_not(None))`
+   - Division operations: any `/` or `//` that could divide by zero (CHECK get_completion_rate)
+   - Sorting operations: `sorted()` or `.sort()` on values that might be None (CHECK get_top_learners)
+   - Aggregation without NULL filters: `func.avg()` without `.where(score.is_not(None))`
    - Missing empty list checks: operations on `item_ids` without checking if it's empty
 
 ### Architecture/Request Journey Questions (CRITICAL):
@@ -427,32 +458,64 @@ When asked about bugs, errors, or crashes in analytics endpoints:
 - Explain how the pipeline ensures the same data can be loaded twice without duplicates
 
 ### Error Handling Comparison Questions (CRITICAL):
-When asked to compare error handling between ETL and API:
+When asked to compare error handling between ETL pipeline and API endpoints:
 
-1. First read backend/app/etl.py:
-   - Look for try/except blocks, transaction handling
-   - Notice how errors cause rollback of entire transaction
-   - ETL ensures data consistency - either all changes succeed or none do
-   - Key pattern: `await session.commit()` only at the end, errors trigger rollback
+STEP 1: Read backend/app/etl.py and analyze error handling:
+- Look at the `load_logs` function (around line 120-160)
+- Key pattern: Transaction-based error handling
+- Code example from etl.py:
+  ```python
+  # All operations in a single transaction
+  session.add(interaction)
+  # ... multiple adds ...
+  await session.commit()  # Only committed at the end
+  # If any operation fails, entire transaction is rolled back
+  ```
+- Error handling characteristics:
+  - Uses database transactions (session.begin/commit)
+  - If ANY operation fails, ALL changes are rolled back
+  - Ensures data consistency - either ALL records are saved or NONE
+  - Errors propagate up, triggering automatic rollback
+  - Prioritizes data integrity over availability
 
-2. Then read backend/app/routers/analytics.py (or other routers):
-   - Look at how API endpoints handle errors
-   - API returns HTTP exceptions with status codes
-   - Individual request failures don't affect others
-   - Key pattern: raise HTTPException(status_code=...) for errors
+STEP 2: Read backend/app/routers/analytics.py (and other routers):
+- Look at how individual endpoints handle errors
+- Code example from analytics.py:
+  ```python
+  @router.get("/completion-rate")
+  async def get_completion_rate(...):
+      # No try/except - errors propagate as HTTP exceptions
+      # FastAPI converts exceptions to HTTP responses:
+      # - 400 for bad requests
+      # - 404 for not found
+      # - 500 for server errors
+  ```
+- Error handling characteristics:
+  - No explicit transactions (each query is independent)
+  - Errors return HTTP status codes to the client
+  - One failed request doesn't affect other requests
+  - Uses HTTPException for specific error cases
+  - Prioritizes availability over consistency
 
-3. Key differences to highlight:
-   - ETL: Transactional, atomic operations, rollback on failure
-   - API: Non-transactional, per-request error handling, returns error responses
-   - ETL prioritizes data integrity, API prioritizes availability
-   - ETL uses `try/except` with transaction rollback
-   - API uses `HTTPException` with appropriate status codes (400, 404, 500)
+STEP 3: Compare the two approaches:
 
-4. When answering comparison questions:
-   - Read BOTH files (etl.py AND the router files)
-   - Describe each approach separately first
-   - Then compare: which is more robust and why
-   - Consider: data consistency, user experience, recovery options
+| Aspect | ETL Pipeline | API Endpoints |
+|--------|--------------|---------------|
+| Transaction scope | Entire batch (all records) | Single request |
+| On error | Rollback everything | Return error response |
+| Data consistency | Guaranteed (atomic) | Per-request only |
+| Availability | Lower (all-or-nothing) | Higher (partial success OK) |
+| Error recovery | Retry entire batch | Retry individual requests |
+| Use case | Data ingestion (integrity critical) | User queries (availability critical) |
+
+STEP 4: Answer the comparison question:
+- Describe ETL approach: transactional, atomic, rollback on failure
+- Describe API approach: per-request, HTTP exceptions, independent failures
+- State which is more robust AND WHY:
+  - ETL is more robust for DATA INTEGRITY (no partial updates)
+  - API is more robust for USER EXPERIENCE (one failure doesn't break everything)
+  - The "better" approach depends on the use case
+- Include specific code examples from both files in your answer
 
 ## Important rules:
 - For router questions: you MUST read ALL .py files in backend/app/routers/ before answering
@@ -476,7 +539,7 @@ When asked to compare error handling between ETL and API:
     
     # For bug-finding questions, add hint
     if bug_question:
-        user_message += "\n\n[SYSTEM HINT: This question asks about a bug. FIRST use query_api to reproduce the error, then read the source code to find the buggy line.]"
+        user_message += "\n\n[SYSTEM HINT: This question asks about bugs. You MUST find BOTH bugs in analytics.py: (1) Division by zero in get_completion_rate() - search for '/' division operations, (2) Missing NULL filter in get_top_learners() - compare with get_scores/get_pass_rates/get_groups functions. Read backend/app/routers/analytics.py COMPLETELY and identify BOTH issues.]"
     
     # For architecture questions, add hint
     if architecture_question:
@@ -485,6 +548,10 @@ When asked to compare error handling between ETL and API:
     # For ETL questions, add hint
     if etl_question:
         user_message += "\n\n[SYSTEM HINT: This question asks about ETL/idempotency. Read backend/app/etl.py and look at the load function for duplicate handling.]"
+
+    # For error handling comparison questions, add hint
+    if error_handling_comparison_question:
+        user_message += "\n\n[SYSTEM HINT: This question asks about error handling. Read BOTH: (1) backend/app/etl.py - look at load_logs() function for transaction handling with session.commit()/rollback, (2) backend/app/routers/analytics.py - look at how endpoints handle errors. Then compare: ETL uses transactions (all-or-nothing), API uses per-request error handling. Include code examples from both files.]"
 
     messages = [
         {"role": "system", "content": system_prompt},
