@@ -323,7 +323,7 @@ def main():
         "pipeline" in question_lower and ("duplicate" in question_lower or "twice" in question_lower or "same data" in question_lower)
     )
 
-    system_prompt = f"""You are a system agent with access to three tools:
+        system_prompt = f"""You are a system agent with access to three tools:
 1. read_file(path) - reads files from the project repository
 2. list_files(path) - lists contents of a directory
 3. query_api(method, path, body, use_auth) - calls the deployed backend API at {AGENT_API_BASE_URL}
@@ -367,14 +367,34 @@ def main():
 - Example: query_api(method="GET", path="/items/", use_auth=false)
 - If you get a connection error, the API might not be running - but still report what you tried
 
-### Bug-Finding Questions (CRITICAL):
-- If the question asks about errors, bugs, or crashes:
-  1. FIRST use query_api to reproduce the error (get the actual error message)
-  2. Then use read_file to read the relevant source code
-  3. Find the specific line causing the bug
-  4. Explain what the bug is and why it causes the error
-- For analytics bugs: check for division by zero, None handling, missing data cases
-- Include the buggy code line in your answer
+### Bug-Finding Questions (CRITICAL - READ CAREFULLY):
+When asked about bugs, errors, or crashes in analytics endpoints:
+
+1. For `/analytics/completion-rate`:
+   - Look for division operations. The bug is division by zero when total_learners = 0
+   - Check line ~212: `rate = (passed_learners / total_learners) * 100`
+   - The fix: check if total_learners > 0 before dividing
+
+2. For `/analytics/top-learners` (THIS IS A COMMON BUG):
+   - COMPARE with other analytics functions in the same file (scores, pass-rates, groups)
+   - Notice that other functions have `.where(InteractionLog.score.is_not(None))`
+   - The bug is that top-learners MISSES this filter
+   - This causes NULL scores to be included in AVG, leading to crashes when sorting
+   - The specific issue: NULL values in score column cause AVG to return NULL, then sorting fails
+
+3. For ANY bug question about analytics endpoints:
+   - ALWAYS compare the function with similar functions in the same file
+   - Look for missing NULL filters (score.is_not(None))
+   - Look for division operations that could cause ZeroDivisionError
+   - Look for sorting of values that might be NULL
+   - Check what happens when item_ids is empty list []
+
+4. General approach for bug questions:
+   - FIRST use query_api to reproduce the error (get the actual error message)
+   - Then use read_file to read the relevant source code (usually analytics.py)
+   - Find the specific line causing the bug by comparing with working functions
+   - Explain what the bug is and why it causes the error
+   - Include the buggy code line in your answer
 
 ### Architecture/Request Journey Questions (CRITICAL):
 - If the question asks about request flow, architecture, or how the system works:
@@ -393,12 +413,31 @@ def main():
   4. Look for `external_id` handling and conflict resolution
 - Explain how the pipeline ensures the same data can be loaded twice without duplicates
 
+### Error Handling Comparison Questions (NEW):
+When asked to compare error handling between ETL and API:
+
+1. First read backend/app/etl.py:
+   - Look for try/except blocks, transaction handling
+   - Notice how errors cause rollback of entire transaction
+   - ETL ensures data consistency - either all changes succeed or none do
+
+2. Then read backend/app/routers/analytics.py (or other routers):
+   - Look at how API endpoints handle errors
+   - API returns HTTP exceptions with status codes
+   - Individual request failures don't affect others
+
+3. Key differences to highlight:
+   - ETL: Transactional, atomic operations, rollback on failure
+   - API: Non-transactional, per-request error handling, returns error responses
+   - ETL prioritizes data integrity, API prioritizes availability
+
 ## Important rules:
 - For router questions: you MUST read ALL .py files in backend/app/routers/ before answering
 - For wiki questions: include source reference like [wiki/git.md]
 - For questions about missing auth: ALWAYS set use_auth=false in query_api
 - For status code questions: ALWAYS use query_api and report the exact status code
 - For bug questions: ALWAYS query the API first to see the error, then read the source code
+- For bug questions about analytics: ALWAYS compare with other functions in the same file
 - Always think step by step and use the right tool for each question type"""
 
     # For status code questions, add extra emphasis in the user message
