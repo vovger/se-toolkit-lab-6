@@ -175,8 +175,15 @@ TOOLS = [
 
 def execute_tool(tool_call):
     name = tool_call["function"]["name"]
-    args = json.loads(tool_call["function"]["arguments"])
     
+    # Safe JSON parsing for arguments
+    arguments_str = tool_call["function"].get("arguments", "")
+    try:
+        args = json.loads(arguments_str) if arguments_str else {}
+    except json.JSONDecodeError:
+        log_error(f"Failed to parse arguments: {arguments_str}")
+        args = {}
+
     if name == "read_file":
         result = read_file(**args)
     elif name == "list_files":
@@ -323,7 +330,7 @@ def main():
         "pipeline" in question_lower and ("duplicate" in question_lower or "twice" in question_lower or "same data" in question_lower)
     )
 
-        system_prompt = f"""You are a system agent with access to three tools:
+    system_prompt = f"""You are a system agent with access to three tools:
 1. read_file(path) - reads files from the project repository
 2. list_files(path) - lists contents of a directory
 3. query_api(method, path, body, use_auth) - calls the deployed backend API at {AGENT_API_BASE_URL}
@@ -396,6 +403,12 @@ When asked about bugs, errors, or crashes in analytics endpoints:
    - Explain what the bug is and why it causes the error
    - Include the buggy code line in your answer
 
+5. When reading analytics.py to find bugs, look for these risky operations:
+   - Division operations: any `/` or `//` that could divide by zero
+   - Sorting operations: `sorted()` or `.sort()` on values that might be None
+   - Aggregation without NULL filters: `func.avg()`, `func.sum()` without `.where(score.is_not(None))`
+   - Missing empty list checks: operations on `item_ids` without checking if it's empty
+
 ### Architecture/Request Journey Questions (CRITICAL):
 - If the question asks about request flow, architecture, or how the system works:
   1. Read docker-compose.yml to understand service orchestration
@@ -413,23 +426,33 @@ When asked about bugs, errors, or crashes in analytics endpoints:
   4. Look for `external_id` handling and conflict resolution
 - Explain how the pipeline ensures the same data can be loaded twice without duplicates
 
-### Error Handling Comparison Questions (NEW):
+### Error Handling Comparison Questions (CRITICAL):
 When asked to compare error handling between ETL and API:
 
 1. First read backend/app/etl.py:
    - Look for try/except blocks, transaction handling
    - Notice how errors cause rollback of entire transaction
    - ETL ensures data consistency - either all changes succeed or none do
+   - Key pattern: `await session.commit()` only at the end, errors trigger rollback
 
 2. Then read backend/app/routers/analytics.py (or other routers):
    - Look at how API endpoints handle errors
    - API returns HTTP exceptions with status codes
    - Individual request failures don't affect others
+   - Key pattern: raise HTTPException(status_code=...) for errors
 
 3. Key differences to highlight:
    - ETL: Transactional, atomic operations, rollback on failure
    - API: Non-transactional, per-request error handling, returns error responses
    - ETL prioritizes data integrity, API prioritizes availability
+   - ETL uses `try/except` with transaction rollback
+   - API uses `HTTPException` with appropriate status codes (400, 404, 500)
+
+4. When answering comparison questions:
+   - Read BOTH files (etl.py AND the router files)
+   - Describe each approach separately first
+   - Then compare: which is more robust and why
+   - Consider: data consistency, user experience, recovery options
 
 ## Important rules:
 - For router questions: you MUST read ALL .py files in backend/app/routers/ before answering
@@ -438,6 +461,8 @@ When asked to compare error handling between ETL and API:
 - For status code questions: ALWAYS use query_api and report the exact status code
 - For bug questions: ALWAYS query the API first to see the error, then read the source code
 - For bug questions about analytics: ALWAYS compare with other functions in the same file
+- For bug questions: look for division by zero, NULL sorting, missing NULL filters
+- For error handling comparison: read BOTH etl.py AND router files, compare transactional vs per-request handling
 - Always think step by step and use the right tool for each question type"""
 
     # For status code questions, add extra emphasis in the user message
@@ -492,9 +517,17 @@ When asked to compare error handling between ETL and API:
 
         if message.get("tool_calls"):
             for tc in message["tool_calls"]:
+                # Safe JSON parsing for arguments
+                arguments_str = tc["function"].get("arguments", "")
+                try:
+                    args = json.loads(arguments_str) if arguments_str else {}
+                except json.JSONDecodeError:
+                    log_error(f"Failed to parse arguments: {arguments_str}")
+                    args = {}
+                
                 tc_data = {
                     "tool": tc["function"]["name"],
-                    "args": json.loads(tc["function"]["arguments"]),
+                    "args": args,
                     "result": None
                 }
                 all_tool_calls.append(tc_data)
